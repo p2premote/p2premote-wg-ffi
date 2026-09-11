@@ -877,10 +877,11 @@ func clearWintunFirewallRule(localIP string, peerIP netip.Addr) error {
 }
 
 func clearAllWintunFirewallRules() {
-	_ = exec.Command(
-		"powershell", "-NoProfile", "-NonInteractive", "-Command",
-		"Get-NetFirewallRule -DisplayName 'p2pRemote WGVPN Wintun *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
-	).Run()
+	// Windows 7 does not ship the NetSecurity PowerShell module, so
+	// Get-NetFirewallRule/Remove-NetFirewallRule fail before the Wintun peer
+	// can start. Per-peer rules are removed by reconcileWintunFirewall and by
+	// clearWintunFirewallRule; leaving an old, IP-scoped rule is harmless and
+	// avoids touching unrelated firewall policy during startup cleanup.
 }
 
 func (e *windowsSubnetEngine) reconcileWintunFirewall(key string, localIP netip.Addr, peers []*windowsSubnetPeer) error {
@@ -924,17 +925,24 @@ func ensureWintunFirewallRule(localIP, peerIP netip.Addr) error {
 	}
 	localText, peerText := localIP.String(), peerIP.String()
 	name := wintunFirewallRuleName(localText, peerIP)
-	// A rule is scoped to one peer. Treat the Windows firewall as the source of
-	// truth rather than trusting our in-process cache: a same-named rule can be
-	// stale, externally edited, or have survived a partial prior operation.
-	// If no valid rule exists, install the replacement before deleting invalid
-	// ones so an established session never sees an allow-rule gap.
-	script := fmt.Sprintf(
-		"$ErrorActionPreference = 'Stop'; $rules = @(Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue); $valid = @(); $invalid = @(); foreach ($rule in $rules) { $address = @($rule | Get-NetFirewallAddressFilter); $interface = @($rule | Get-NetFirewallInterfaceFilter); $matches = $rule.Direction.ToString() -eq 'Inbound' -and $rule.Action.ToString() -eq 'Allow' -and $address.Count -eq 1 -and $interface.Count -eq 1 -and @($address[0].LocalAddress) -contains '%s' -and @($address[0].RemoteAddress) -contains '%s' -and @($interface[0].InterfaceAlias) -contains '%s'; if ($matches) { $valid += $rule } else { $invalid += $rule } }; if ($valid.Count -eq 0) { $ruleName = 'p2premote-wgvpn-' + [guid]::NewGuid().ToString('N'); New-NetFirewallRule -Name $ruleName -DisplayName '%s' -Direction Inbound -Action Allow -Profile Any -InterfaceAlias '%s' -Protocol Any -LocalAddress '%s' -RemoteAddress '%s' | Out-Null }; if ($invalid.Count -gt 0) { $invalid | Remove-NetFirewallRule }",
-		name, localText, peerText, wintunAdapterName(localIP), name, wintunAdapterName(localIP), localText, peerText,
-	)
+	// Use netsh instead of the PowerShell NetSecurity module. netsh is present
+	// on Windows 7 and later; scoping the rule to the two virtual addresses
+	// keeps it equivalent to the modern interface-filtered rule.
+	if _, err := exec.Command(
+		"netsh", "advfirewall", "firewall", "show", "rule", "name="+name,
+	).CombinedOutput(); err == nil {
+		return nil
+	}
 	output, err := exec.Command(
-		"powershell", "-NoProfile", "-NonInteractive", "-Command", script,
+		"netsh", "advfirewall", "firewall", "add", "rule",
+		"name="+name,
+		"dir=in",
+		"action=allow",
+		"profile=any",
+		"interfacetype=any",
+		"protocol=any",
+		"localip="+localText,
+		"remoteip="+peerText,
 	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("configure Wintun firewall: %w: %s", err, strings.TrimSpace(string(output)))
