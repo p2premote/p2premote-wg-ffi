@@ -1,0 +1,4 @@
+# Android AAR：体积大且随 wireguard-go 改动频繁重生成，不入库。
+# 由 build-android-aar.sh 按需构建，拷贝到 p2premote-android-client/app/libs/。
+*.aar
+*-sources.jar
