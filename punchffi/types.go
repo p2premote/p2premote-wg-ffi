@@ -1,24 +1,9 @@
-//go:build !cgo
-
 package main
 
-type udpTunnelInput struct {
-	Token            string `json:"token"`
-	RoleHint         string `json:"role_hint"`
-	TraversalMode    string `json:"traversal_mode"`
-	Network          string `json:"network"`
-	TimeoutSecs      int    `json:"timeout_secs"`
-	BindIP           string `json:"bind_ip"`
-	LocalListenIP    string `json:"local_listen_ip"`
-	LocalListenPort  int    `json:"local_listen_port"`
-	RemoteTargetIP   string `json:"remote_target_ip"`
-	RemoteTargetPort int    `json:"remote_target_port"`
-	AllowRelay       bool   `json:"allow_relay"`
-}
-
-type stopTunnelInput struct {
-	HandleID string `json:"handle_id"`
-}
+// Shared JSON ABI types for the wgonly C-ABI entry points (wgmain.go) and the
+// subnet-router / WGVPN engine files. The Rust FFI consumers declare
+// field-compatible mirrors of these structs; changing a json tag changes the
+// DLL wire format.
 
 type startSubnetRouterInput struct {
 	SessionID       int64    `json:"session_id"`
@@ -127,9 +112,4 @@ type subnetRouterResult struct {
 	LastError        string   `json:"last_error,omitempty"`
 	AdvertisedRoutes []string `json:"advertised_routes,omitempty"`
 	Error            string   `json:"error,omitempty"`
-}
-
-type stopTunnelResult struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
 }

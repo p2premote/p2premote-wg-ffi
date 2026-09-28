@@ -1,7 +1,5 @@
-// Candidate dependency baseline for the standalone Windows WG data-plane
-// module. This file is intentionally separate from go.mod: the current
-// punchffi package still contains gonc/Punch code and must not be downgraded
-// as a whole.
+// Dependencies for the standalone userspace WireGuard data-plane module.
+// The Windows DLL is built with the wgonly tag; see README.md.
 module github.com/p2premote/p2premote-wg-ffi
 
 go 1.20

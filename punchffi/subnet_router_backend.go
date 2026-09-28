@@ -1,4 +1,6 @@
-// p2premote extension: this entire file implements p2premote's subnet-router backend around gonc connections.
+// p2premote extension: this entire file implements p2premote's subnet-router
+// backend: the cross-platform handle registry plus the Linux kernel
+// iptables/sysctl routing path.
 package main
 
 import (
