@@ -22,7 +22,7 @@ import (
 
 func platformWgCapabilities() *wgCapabilitiesResult {
 	return &wgCapabilitiesResult{
-		OK: true, ABIVersion: 2, Platform: "windows", UserspaceWG: true, HybridTun: true, Wintun: true, NativeTun: true, NetstackProxy: true,
+		OK: true, ABIVersion: 2, Platform: "windows", UserspaceWG: true, HybridTun: true, Wintun: true, NativeTun: true,
 	}
 }
 
@@ -39,8 +39,12 @@ func pingArgs(dst string) []string {
 	return []string{"-n", "1", "-w", "3000", dst}
 }
 
+// Startup cleanup deliberately does not sweep Wintun firewall rules: Windows 7
+// does not ship the NetSecurity PowerShell module, per-peer rules are already
+// reconciled by reconcileWintunFirewall / clearWintunFirewallRule when an
+// adapter comes back up, and leaving an old, IP-scoped rule behind is harmless
+// while touching unrelated firewall policy is not.
 func cleanupNativePlatform() error {
-	clearAllWintunFirewallRules()
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return fmt.Errorf("enumerate network adapters: %w", err)
@@ -182,14 +186,6 @@ func clearWintunFirewallRule(localIP string, peerIP netip.Addr) error {
 		return fmt.Errorf("clear Wintun firewall rule: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-func clearAllWintunFirewallRules() {
-	// Windows 7 does not ship the NetSecurity PowerShell module, so
-	// Get-NetFirewallRule/Remove-NetFirewallRule fail before the Wintun peer
-	// can start. Per-peer rules are removed by reconcileWintunFirewall and by
-	// clearWintunFirewallRule; leaving an old, IP-scoped rule is harmless and
-	// avoids touching unrelated firewall policy during startup cleanup.
 }
 
 func (e *windowsSubnetEngine) reconcileWintunFirewall(key string, localIP netip.Addr, peers []*windowsSubnetPeer) error {

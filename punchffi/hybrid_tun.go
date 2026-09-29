@@ -46,7 +46,6 @@ type hybridPacketDisposition uint8
 
 const (
 	hybridPacketNetstack hybridPacketDisposition = iota
-	hybridPacketNative
 	hybridPacketConsumed
 )
 
@@ -172,8 +171,6 @@ func (h *hybridTun) Write(bufs [][]byte, offset int) (int, error) {
 			disposition = h.packetHandler(raw, offset)
 		}
 		switch disposition {
-		case hybridPacketNative:
-			return 0, fmt.Errorf("native packet must be handled by the classifier")
 		case hybridPacketConsumed:
 			continue
 		default:

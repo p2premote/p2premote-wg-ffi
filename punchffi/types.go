@@ -77,15 +77,14 @@ type windowsWgPeerResult struct {
 }
 
 type wgCapabilitiesResult struct {
-	OK            bool   `json:"ok"`
-	ABIVersion    int    `json:"abi_version"`
-	Platform      string `json:"platform"`
-	UserspaceWG   bool   `json:"userspace_wg"`
-	HybridTun     bool   `json:"hybrid_tun"`
-	Wintun        bool   `json:"wintun"`
-	NativeTun     bool   `json:"native_tun"`
-	NetstackProxy bool   `json:"netstack_proxy"`
-	Error         string `json:"error,omitempty"`
+	OK          bool   `json:"ok"`
+	ABIVersion  int    `json:"abi_version"`
+	Platform    string `json:"platform"`
+	UserspaceWG bool   `json:"userspace_wg"`
+	HybridTun   bool   `json:"hybrid_tun"`
+	Wintun      bool   `json:"wintun"`
+	NativeTun   bool   `json:"native_tun"`
+	Error       string `json:"error,omitempty"`
 }
 
 type wgKeypairResult struct {

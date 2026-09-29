@@ -85,10 +85,6 @@ func waitWindowsSubnetPeer(peer *windowsSubnetPeer, timeout time.Duration) bool 
 
 type windowsSubnetEngine struct {
 	privateKey string
-	// tailIP is retained for compatibility with focused netstack tests. Runtime
-	// routing uses each peer's localTailIP so active and passive roles can share
-	// one engine.
-	tailIP     netip.Addr
 	listenIP   string
 	listenPort int
 	tun        *hybridTun
@@ -114,8 +110,7 @@ type windowsSubnetEngine struct {
 }
 
 type windowsRegisteredAddress struct {
-	refs       int
-	persistent bool
+	refs int
 }
 
 var windowsSubnetManager struct {
@@ -137,12 +132,12 @@ func startWindowsSubnetRouter(req startSubnetRouterInput) *subnetRouterResult {
 	defer windowsSubnetManager.Unlock()
 	engine := windowsSubnetManager.engine
 	if engine == nil {
-		engine, err = newWindowsSubnetEngine(req, tailIP)
+		engine, err = newWindowsSubnetEngine(req)
 		if err != nil {
 			return &subnetRouterResult{OK: false, Error: err.Error()}
 		}
 		windowsSubnetManager.engine = engine
-	} else if err := engine.compatible(req, tailIP); err != nil {
+	} else if err := engine.compatible(req); err != nil {
 		return &subnetRouterResult{OK: false, Error: err.Error()}
 	}
 	if err := engine.checkPeerConflicts("passive", peerKey, peerTailIP, routes); err != nil {
@@ -165,16 +160,6 @@ func startWindowsSubnetRouter(req startSubnetRouterInput) *subnetRouterResult {
 		return &subnetRouterResult{OK: false, Error: err.Error()}
 	}
 	engine.peers[handleID] = peer
-	if err := engine.refreshNetstackAddresses(); err != nil {
-		delete(engine.peers, handleID)
-		engine.removePeerConfig(peer)
-		cancel()
-		if len(engine.peers) == 0 {
-			engine.close()
-			windowsSubnetManager.engine = nil
-		}
-		return &subnetRouterResult{OK: false, Error: err.Error()}
-	}
 
 	result := subnetRouterResult{OK: true, HandleID: handleID, LanMode: "userspace_snat", ListenIP: req.ListenIP, ListenPort: req.ListenPort, Started: true, AdvertisedRoutes: peer.advertised}
 	subnetRoutersMu.Lock()
@@ -207,7 +192,7 @@ func validateWindowsSubnetRequest(req startSubnetRouterInput) (netip.Addr, netip
 	return tailIP.Unmap(), peerTailIP.Unmap(), routes, nil
 }
 
-func newWindowsSubnetEngine(req startSubnetRouterInput, tailIP netip.Addr) (*windowsSubnetEngine, error) {
+func newWindowsSubnetEngine(req startSubnetRouterInput) (*windowsSubnetEngine, error) {
 	privateKey, err := wgKeyBase64ToHex(req.WgPrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid wg_private_key: %w", err)
@@ -219,7 +204,7 @@ func newWindowsSubnetEngine(req startSubnetRouterInput, tailIP netip.Addr) (*win
 	concreteTun := tunDev.(*subnetNetTun)
 	hybrid := newHybridTun(concreteTun)
 	engine := &windowsSubnetEngine{
-		privateKey: privateKey, tailIP: tailIP, listenIP: req.ListenIP, listenPort: req.ListenPort,
+		privateKey: privateKey, listenIP: req.ListenIP, listenPort: req.ListenPort,
 		tun: hybrid, net: netstackDev, bind: newLoopbackBind(), peers: map[string]*windowsSubnetPeer{}, registered: map[netip.Addr]windowsRegisteredAddress{},
 		nativeRoutes: map[string]map[netip.Prefix]struct{}{}, nativeFirewallPeers: map[string]map[netip.Addr]struct{}{},
 		tcpSem: make(chan struct{}, windowsMaxTCPSessions), udpSem: make(chan struct{}, windowsMaxUDPSessions), icmpSem: make(chan struct{}, windowsMaxICMPSessions),
@@ -238,7 +223,7 @@ func newWindowsSubnetEngine(req startSubnetRouterInput, tailIP netip.Addr) (*win
 	return engine, nil
 }
 
-func (e *windowsSubnetEngine) compatible(req startSubnetRouterInput, tailIP netip.Addr) error {
+func (e *windowsSubnetEngine) compatible(req startSubnetRouterInput) error {
 	privateKey, err := wgKeyBase64ToHex(req.WgPrivateKey)
 	if err != nil {
 		return fmt.Errorf("invalid wg_private_key: %w", err)
@@ -246,7 +231,6 @@ func (e *windowsSubnetEngine) compatible(req startSubnetRouterInput, tailIP neti
 	if privateKey != e.privateKey || req.ListenPort != e.listenPort || req.ListenIP != e.listenIP {
 		return fmt.Errorf("subnet router engine parameters conflict with an active session")
 	}
-	_ = tailIP
 	return nil
 }
 
@@ -351,7 +335,7 @@ func startWindowsWgPeer(req startWindowsWgPeerInput) *windowsWgPeerResult {
 	windowsSubnetManager.Lock()
 	engine := windowsSubnetManager.engine
 	if engine == nil {
-		engine, err = newWindowsSubnetEngine(compatReq, localTailIP.Unmap())
+		engine, err = newWindowsSubnetEngine(compatReq)
 		if err != nil {
 			windowsSubnetManager.Unlock()
 			return &windowsWgPeerResult{OK: false, Error: err.Error()}
@@ -371,7 +355,7 @@ func startWindowsWgPeer(req startWindowsWgPeerInput) *windowsWgPeerResult {
 		windowsSubnetManager.Unlock()
 		return &windowsWgPeerResult{OK: false, Error: "userspace WireGuard engine stopped while starting peer"}
 	}
-	if err := engine.compatible(compatReq, localTailIP.Unmap()); err != nil {
+	if err := engine.compatible(compatReq); err != nil {
 		windowsSubnetManager.Unlock()
 		return &windowsWgPeerResult{OK: false, Error: err.Error()}
 	}
@@ -461,7 +445,7 @@ func stopWindowsWgPeer(handleID string) *windowsWgPeerResult {
 		return &windowsWgPeerResult{OK: true}
 	}
 	engine.removePeerConfig(peer)
-	engine.removeRegisteredAddresses(handleID)
+	engine.removeRegisteredAddresses()
 	if len(engine.peers) == 0 {
 		engine.close()
 		windowsSubnetManager.engine = nil
@@ -690,9 +674,6 @@ func makeICMPEchoRequest(src, dst netip.Addr) []byte {
 // hooks and delegates address/route/firewall work to configureNativeTun /
 // clearNativeTun.
 func (e *windowsSubnetEngine) refreshPlatformState() error {
-	if err := e.refreshNetstackAddresses(); err != nil {
-		return err
-	}
 	nativeByLocalIP := make(map[string][]*windowsSubnetPeer)
 	// The caller serializes control-plane updates with configMu. Take the
 	// manager lock only long enough to snapshot peers; forwarding is then free
@@ -793,11 +774,11 @@ func (e *windowsSubnetEngine) reconcileNativeRoutes(key string, routes []netip.P
 	return nil
 }
 
-func (e *windowsSubnetEngine) removeRegisteredAddresses(_ string) {
+func (e *windowsSubnetEngine) removeRegisteredAddresses() {
 	e.registeredMu.Lock()
 	defer e.registeredMu.Unlock()
 	for ip, registration := range e.registered {
-		if registration.persistent || registration.refs > 0 {
+		if registration.refs > 0 {
 			continue
 		}
 		_ = e.net.stack.RemoveAddress(subnetNetstackNICID, tcpip.AddrFromSlice(ip.AsSlice()))
@@ -835,12 +816,10 @@ func stopWindowsSubnetPeer(handleID string) {
 	if e.wg != nil {
 		_ = e.wg.IpcSet("public_key=" + peer.publicKey + "\nremove=true\n")
 	}
-	e.removeRegisteredAddresses(handleID)
+	e.removeRegisteredAddresses()
 	if len(e.peers) == 0 {
 		e.close()
 		windowsSubnetManager.engine = nil
-	} else {
-		_ = e.refreshNetstackAddresses()
 	}
 }
 
@@ -885,10 +864,7 @@ func (e *windowsSubnetEngine) resolvePeer(src, dst netip.Addr) *windowsSubnetPee
 }
 
 func (e *windowsSubnetEngine) peerLocalTailIP(peer *windowsSubnetPeer) netip.Addr {
-	if peer.localTailIP.IsValid() {
-		return peer.localTailIP
-	}
-	return e.tailIP
+	return peer.localTailIP
 }
 
 func prefixContains(prefixes []netip.Prefix, address netip.Addr) bool {
@@ -913,50 +889,27 @@ func (e *windowsSubnetEngine) ensureAddress(peer *windowsSubnetPeer, ip netip.Ad
 	return nil
 }
 
-func (e *windowsSubnetEngine) refreshNetstackAddresses() error {
-	e.registeredMu.Lock()
-	defer e.registeredMu.Unlock()
-	// Local virtual IPs are owned by Wintun for both roles. gVisor only keeps
-	// dynamically retained LAN destination addresses used by its TCP/UDP/ICMP
-	// proxy, so remove any persistent addresses left by the old passive path.
-	for ip, registration := range e.registered {
-		if !registration.persistent {
-			continue
-		}
-		if err := e.net.stack.RemoveAddress(subnetNetstackNICID, tcpip.AddrFromSlice(ip.AsSlice())); err != nil {
-			return fmt.Errorf("remove stale passive local IP %s: %v", ip, err)
-		}
-		delete(e.registered, ip)
-	}
-	return nil
-}
-
-func (e *windowsSubnetEngine) retainAddress(peer *windowsSubnetPeer, ip netip.Addr) bool {
-	_ = peer
+func (e *windowsSubnetEngine) retainAddress(ip netip.Addr) bool {
 	e.registeredMu.Lock()
 	defer e.registeredMu.Unlock()
 	registration, ok := e.registered[ip]
 	if !ok {
 		return false
 	}
-	if registration.persistent {
-		return true
-	}
 	registration.refs++
 	e.registered[ip] = registration
 	return true
 }
 
-func (e *windowsSubnetEngine) releaseAddress(peer *windowsSubnetPeer, ip netip.Addr) {
-	_ = peer
+func (e *windowsSubnetEngine) releaseAddress(ip netip.Addr) {
 	e.registeredMu.Lock()
 	defer e.registeredMu.Unlock()
 	registration, ok := e.registered[ip]
-	if !ok || registration.persistent {
+	if !ok {
 		return
 	}
 	registration.refs--
-	if registration.refs <= 0 && !registration.persistent {
+	if registration.refs <= 0 {
 		_ = e.net.stack.RemoveAddress(subnetNetstackNICID, tcpip.AddrFromSlice(ip.AsSlice()))
 		delete(e.registered, ip)
 		return
@@ -1026,7 +979,7 @@ func (e *windowsSubnetEngine) handleTCP(req *gtcp.ForwarderRequest) {
 		req.Complete(true)
 		return
 	}
-	if !e.retainAddress(peer, dst.Unmap()) {
+	if !e.retainAddress(dst.Unmap()) {
 		peer.rejected.Add(1)
 		req.Complete(true)
 		return
@@ -1034,7 +987,7 @@ func (e *windowsSubnetEngine) handleTCP(req *gtcp.ForwarderRequest) {
 	select {
 	case e.tcpSem <- struct{}{}:
 	default:
-		e.releaseAddress(peer, dst.Unmap())
+		e.releaseAddress(dst.Unmap())
 		peer.rejected.Add(1)
 		req.Complete(true)
 		return
@@ -1048,7 +1001,7 @@ func (e *windowsSubnetEngine) handleTCP(req *gtcp.ForwarderRequest) {
 	cancel()
 	if err != nil {
 		<-e.tcpSem
-		e.releaseAddress(peer, dst.Unmap())
+		e.releaseAddress(dst.Unmap())
 		peer.lastError.Store(err.Error())
 		req.Complete(true)
 		return
@@ -1057,7 +1010,7 @@ func (e *windowsSubnetEngine) handleTCP(req *gtcp.ForwarderRequest) {
 	ep, terr := req.CreateEndpoint(&wq)
 	if terr != nil {
 		<-e.tcpSem
-		e.releaseAddress(peer, dst.Unmap())
+		e.releaseAddress(dst.Unmap())
 		backend.Close()
 		req.Complete(true)
 		return
@@ -1069,7 +1022,7 @@ func (e *windowsSubnetEngine) handleTCP(req *gtcp.ForwarderRequest) {
 	go func() {
 		defer func() {
 			<-e.tcpSem
-			e.releaseAddress(peer, dst.Unmap())
+			e.releaseAddress(dst.Unmap())
 			peer.tcpActive.Add(-1)
 			peer.wg.Done()
 			backend.Close()
@@ -1098,14 +1051,14 @@ func (e *windowsSubnetEngine) handleUDP(req *gudp.ForwarderRequest) {
 	if peer == nil {
 		return
 	}
-	if !e.retainAddress(peer, dst.Unmap()) {
+	if !e.retainAddress(dst.Unmap()) {
 		peer.rejected.Add(1)
 		return
 	}
 	select {
 	case e.udpSem <- struct{}{}:
 	default:
-		e.releaseAddress(peer, dst.Unmap())
+		e.releaseAddress(dst.Unmap())
 		peer.rejected.Add(1)
 		return
 	}
@@ -1113,10 +1066,10 @@ func (e *windowsSubnetEngine) handleUDP(req *gudp.ForwarderRequest) {
 	ep, terr := req.CreateEndpoint(&wq)
 	if terr != nil {
 		<-e.udpSem
-		e.releaseAddress(peer, dst.Unmap())
+		e.releaseAddress(dst.Unmap())
 		return
 	}
-	client := newGonetUDPConn(e.net.stack, &wq, ep)
+	client := gonet.NewUDPConn(e.net.stack, &wq, ep)
 	dstAddr, bindIP := dst.Unmap().String(), net.IPv4zero
 	if dst.Unmap() == e.peerLocalTailIP(peer) {
 		dstAddr, bindIP = "127.0.0.1", net.IPv4(127, 0, 0, 1)
@@ -1124,7 +1077,7 @@ func (e *windowsSubnetEngine) handleUDP(req *gudp.ForwarderRequest) {
 	backend, err := net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
 	if err != nil {
 		<-e.udpSem
-		e.releaseAddress(peer, dst.Unmap())
+		e.releaseAddress(dst.Unmap())
 		client.Close()
 		return
 	}
@@ -1137,7 +1090,7 @@ func (e *windowsSubnetEngine) handleUDP(req *gudp.ForwarderRequest) {
 	go func() {
 		defer func() {
 			<-e.udpSem
-			e.releaseAddress(peer, dst.Unmap())
+			e.releaseAddress(dst.Unmap())
 			peer.udpActive.Add(-1)
 			peer.wg.Done()
 			timer.Stop()

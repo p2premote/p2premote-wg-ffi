@@ -46,7 +46,6 @@ type subnetNetTun struct {
 	incomingPacket chan *buffer.View
 	mtu            int
 	closeOnce      sync.Once
-	packetHandler  func([]byte) bool
 	// closed 在 Close 时关闭，用于让 WriteNotify/injectToWireGuard 的阻塞发送
 	// 能够通过 select 及时退出，避免向已 close 的 incomingPacket 发送导致 panic。
 	// 用 RWMutex 保护：发送方 RLock（允许并发），Close 方 Lock（独占）。
@@ -69,7 +68,7 @@ func createSubnetNetTUN(localAddresses []netip.Addr, mtu int) (tun.Device, *subn
 	// segmentation before packets reach this channel endpoint. sendTCPBatch
 	// still emits MTU-sized IP packets, so wireguard-go never receives a GSO
 	// super-packet that its custom TUN cannot represent.
-	linkEndpoint.SupportedGSOKind = gvisorGSOSupported()
+	linkEndpoint.SupportedGSOKind = stack.GvisorGSOSupported
 	dev := &subnetNetTun{
 		ep:             linkEndpoint,
 		stack:          stack.New(opts),
@@ -172,9 +171,6 @@ func (tunDev *subnetNetTun) Write(buf [][]byte, offset int) (int, error) {
 	for _, packetBuf := range buf {
 		packet := packetBuf[offset:]
 		if len(packet) == 0 {
-			continue
-		}
-		if tunDev.packetHandler != nil && tunDev.packetHandler(packet) {
 			continue
 		}
 		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
