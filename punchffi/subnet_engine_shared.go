@@ -1,6 +1,9 @@
-//go:build windows
+//go:build wgonly
 
-// p2premote extension: this entire file implements p2premote's Windows WGVPN subnet router.
+// p2premote extension: the userspace WireGuard engine shared by the Windows
+// DLL and the macOS dylib. Platform-specific native-TUN plumbing (Wintun on
+// Windows, utun on macOS) lives in subnet_platform_windows.go /
+// subnet_platform_darwin.go behind the hooks below.
 package main
 
 import (
@@ -9,7 +12,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,13 +23,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tailscale/wireguard-go/conn"
 	wgdevice "github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun"
 	"golang.org/x/crypto/curve25519"
-	"golang.org/x/sys/windows"
-	"golang.zx2c4.com/wintun"
-	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -42,7 +40,7 @@ const (
 	windowsMaxUDPSessions  = 4096
 	windowsMaxICMPSessions = 20
 	windowsUDPIdleTimeout  = 2 * time.Minute
-	windowsWintunMTU       = 1280
+	windowsNativeTunMTU    = 1280
 	windowsPeerStopTimeout = 5 * time.Second
 )
 
@@ -123,12 +121,6 @@ type windowsRegisteredAddress struct {
 var windowsSubnetManager struct {
 	sync.Mutex
 	engine *windowsSubnetEngine
-}
-
-func platformWgCapabilities() *wgCapabilitiesResult {
-	return &wgCapabilitiesResult{
-		OK: true, ABIVersion: 2, Platform: "windows", UserspaceWG: true, HybridTun: true, Wintun: true, NativeTun: true, NetstackProxy: true,
-	}
 }
 
 func startWindowsSubnetRouter(req startSubnetRouterInput) *subnetRouterResult {
@@ -575,39 +567,10 @@ func stopWindowsWgEngine() *windowsWgPeerResult {
 }
 
 func cleanupWindowsWgPlatform() *windowsWgPeerResult {
-	clearAllWintunFirewallRules()
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return &windowsWgPeerResult{OK: false, Error: "enumerate network adapters: " + err.Error()}
-	}
-	for _, iface := range interfaces {
-		if iface.Name != "p2pRemote" && !strings.HasPrefix(iface.Name, "p2pRemote-") {
-			continue
-		}
-		if err := clearExistingWintunAdapter(iface.Name); err != nil {
-			return &windowsWgPeerResult{OK: false, Error: err.Error()}
-		}
+	if err := cleanupNativePlatform(); err != nil {
+		return &windowsWgPeerResult{OK: false, Error: err.Error()}
 	}
 	return &windowsWgPeerResult{OK: true}
-}
-
-func clearExistingWintunAdapter(name string) error {
-	adapter, err := wintun.OpenAdapter(name)
-	if err != nil {
-		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-			return nil
-		}
-		return fmt.Errorf("open existing Wintun adapter %q: %w", name, err)
-	}
-	defer adapter.Close()
-	luid := winipcfg.LUID(adapter.LUID())
-	if err := clearWintunIPv4Routes(luid); err != nil {
-		return fmt.Errorf("clear stale Wintun routes on %q: %w", name, err)
-	}
-	if err := luid.SetIPAddressesForFamily(windows.AF_INET, nil); err != nil {
-		return fmt.Errorf("clear stale Wintun addresses on %q: %w", name, err)
-	}
-	return nil
 }
 
 func generateWindowsWgKeypair() *wgKeypairResult {
@@ -722,6 +685,10 @@ func makeICMPEchoRequest(src, dst netip.Addr) []byte {
 	return packet
 }
 
+// refreshPlatformState is the shared reconciliation skeleton: it groups peers
+// by local tail IP, creates/destroys native TUN adapters through the platform
+// hooks and delegates address/route/firewall work to configureNativeTun /
+// clearNativeTun.
 func (e *windowsSubnetEngine) refreshPlatformState() error {
 	if err := e.refreshNetstackAddresses(); err != nil {
 		return err
@@ -729,7 +696,7 @@ func (e *windowsSubnetEngine) refreshPlatformState() error {
 	nativeByLocalIP := make(map[string][]*windowsSubnetPeer)
 	// The caller serializes control-plane updates with configMu. Take the
 	// manager lock only long enough to snapshot peers; forwarding is then free
-	// to resolve packets while Windows applies the small delta below.
+	// to resolve packets while the OS applies the small delta below.
 	windowsSubnetManager.Lock()
 	for _, peer := range e.peers {
 		key := peer.localTailIP.String()
@@ -738,16 +705,15 @@ func (e *windowsSubnetEngine) refreshPlatformState() error {
 	windowsSubnetManager.Unlock()
 	for key, peers := range nativeByLocalIP {
 		if e.tun.nativeDevice(key) == nil {
-			tun.WintunTunnelType = "p2pRemote"
-			device, err := tun.CreateTUN(wintunAdapterName(peers[0].localTailIP), 1280)
+			device, err := createNativeTun(peers[0].localTailIP, windowsNativeTunMTU)
 			if err != nil {
-				return fmt.Errorf("create Wintun adapter for %s: %w", key, err)
+				return fmt.Errorf("create native TUN for %s: %w", key, err)
 			}
 			if err := e.tun.attachNative(key, device); err != nil {
 				return err
 			}
 		}
-		if err := e.configureWintun(key, peers); err != nil {
+		if err := e.configureNativeTun(key, e.tun.nativeDevice(key), peers[0].localTailIP, peers); err != nil {
 			return err
 		}
 	}
@@ -755,7 +721,7 @@ func (e *windowsSubnetEngine) refreshPlatformState() error {
 		if _, ok := nativeByLocalIP[key]; ok {
 			continue
 		}
-		if err := e.clearWintunConfig(key); err != nil {
+		if err := e.clearNativeTun(key, e.tun.nativeDevice(key)); err != nil {
 			return err
 		}
 		if err := e.tun.detachNative(key); err != nil {
@@ -765,192 +731,12 @@ func (e *windowsSubnetEngine) refreshPlatformState() error {
 	return nil
 }
 
-func wintunAdapterName(ip netip.Addr) string {
-	return "p2pRemote-" + strings.ReplaceAll(ip.String(), ".", "-")
-}
-
-func (e *windowsSubnetEngine) clearWintunConfig(key string) error {
-	if err := e.reconcileWintunFirewall(key, netip.Addr{}, nil); err != nil {
-		return err
-	}
-	clearLegacyWintunFirewallRule(key)
-	if e.tun == nil {
-		return nil
-	}
-	device := e.tun.nativeDevice(key)
-	if device == nil {
-		return nil
-	}
-	native, ok := device.(interface{ LUID() uint64 })
-	if !ok {
-		return fmt.Errorf("Wintun device does not expose LUID")
-	}
-	luid := winipcfg.LUID(native.LUID())
-	if err := clearWintunIPv4Routes(luid); err != nil {
-		return fmt.Errorf("clear Wintun routes: %w", err)
-	}
-	delete(e.nativeRoutes, key)
-	if err := luid.SetIPAddressesForFamily(windows.AF_INET, nil); err != nil {
-		return fmt.Errorf("clear Wintun addresses: %w", err)
-	}
-	return nil
-}
-
-func (e *windowsSubnetEngine) configureWintun(key string, peers []*windowsSubnetPeer) error {
-	device := e.tun.nativeDevice(key)
-	native, ok := device.(interface{ LUID() uint64 })
-	if !ok {
-		return fmt.Errorf("Wintun device does not expose LUID")
-	}
-	luid := winipcfg.LUID(native.LUID())
-	localIP := peers[0].localTailIP
-	address := netip.PrefixFrom(localIP, 32)
-	if err := ensureWintunIPv4Address(luid, address); err != nil {
-		return fmt.Errorf("configure Wintun address: %w", err)
-	}
-	routePrefixes := wintunRoutePrefixes(peers)
-	ipInterface, err := luid.IPInterface(windows.AF_INET)
-	if err != nil {
-		return fmt.Errorf("query Wintun IPv4 interface: %w", err)
-	}
-	if ipInterface.NLMTU != windowsWintunMTU {
-		ipInterface.NLMTU = windowsWintunMTU
-		if err := ipInterface.Set(); err != nil {
-			return fmt.Errorf("configure Wintun IPv4 MTU: %w", err)
-		}
-	}
-	if err := e.reconcileWintunRoutes(key, luid, routePrefixes); err != nil {
-		return err
-	}
-	if err := e.reconcileWintunFirewall(key, localIP, peers); err != nil {
-		return err
-	}
-	primeWintunRoutes(localIP, peers)
-	return nil
-}
-
-func primeWintunRoutes(localIP netip.Addr, peers []*windowsSubnetPeer) {
-	local := &net.UDPAddr{IP: net.IP(localIP.AsSlice())}
-	for _, peer := range peers {
-		if !peer.peerTailIP.IsValid() {
-			continue
-		}
-		remote := &net.UDPAddr{IP: net.IP(peer.peerTailIP.AsSlice()), Port: 9}
-		conn, err := net.DialUDP("udp4", local, remote)
-		if err != nil {
-			continue
-		}
-		_, _ = conn.Write([]byte{0})
-		_ = conn.Close()
-	}
-}
-
-func wintunFirewallRuleName(localIP string, peerIP netip.Addr) string {
-	return "p2pRemote WGVPN Wintun " + localIP + " peer " + peerIP.String()
-}
-
-// clearLegacyWintunFirewallRule removes the pre-differential aggregate rule.
-// It is only used when an adapter has no remaining peers (or during startup
-// cleanup), never while an existing connection is using that adapter.
-func clearLegacyWintunFirewallRule(localIP string) {
-	if localIP == "" {
-		return
-	}
-	_ = exec.Command(
-		"netsh", "advfirewall", "firewall", "delete", "rule",
-		"name="+"p2pRemote WGVPN Wintun "+localIP,
-	).Run()
-}
-
-func clearWintunFirewallRule(localIP string, peerIP netip.Addr) error {
-	if localIP == "" || !peerIP.IsValid() {
-		return nil
-	}
-	output, err := exec.Command(
-		"netsh", "advfirewall", "firewall", "delete", "rule",
-		"name="+wintunFirewallRuleName(localIP, peerIP),
-	).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("clear Wintun firewall rule: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func clearAllWintunFirewallRules() {
-	// Windows 7 does not ship the NetSecurity PowerShell module, so
-	// Get-NetFirewallRule/Remove-NetFirewallRule fail before the Wintun peer
-	// can start. Per-peer rules are removed by reconcileWintunFirewall and by
-	// clearWintunFirewallRule; leaving an old, IP-scoped rule is harmless and
-	// avoids touching unrelated firewall policy during startup cleanup.
-}
-
-func (e *windowsSubnetEngine) reconcileWintunFirewall(key string, localIP netip.Addr, peers []*windowsSubnetPeer) error {
-	want := make(map[netip.Addr]struct{}, len(peers))
-	for _, peer := range peers {
-		if peer.peerTailIP.IsValid() {
-			want[peer.peerTailIP] = struct{}{}
-		}
-	}
-	if e.nativeFirewallPeers[key] == nil {
-		e.nativeFirewallPeers[key] = map[netip.Addr]struct{}{}
-	}
-	current := e.nativeFirewallPeers[key]
-	for peerIP := range want {
-		// Always verify Windows state. current is only our ownership ledger for
-		// stale-rule removal; it is not evidence that the rule still exists or
-		// still has the expected filter.
-		if err := ensureWintunFirewallRule(localIP, peerIP); err != nil {
-			return err
-		}
-		current[peerIP] = struct{}{}
-	}
-	for peerIP := range current {
-		if _, wanted := want[peerIP]; wanted {
-			continue
-		}
-		if err := clearWintunFirewallRule(key, peerIP); err != nil {
-			return err
-		}
-		delete(current, peerIP)
-	}
-	if len(current) == 0 {
-		delete(e.nativeFirewallPeers, key)
-	}
-	return nil
-}
-
-func ensureWintunFirewallRule(localIP, peerIP netip.Addr) error {
-	if !localIP.IsValid() || !peerIP.IsValid() {
-		return fmt.Errorf("configure Wintun firewall: invalid peer virtual IP")
-	}
-	localText, peerText := localIP.String(), peerIP.String()
-	name := wintunFirewallRuleName(localText, peerIP)
-	// Use netsh instead of the PowerShell NetSecurity module. netsh is present
-	// on Windows 7 and later; scoping the rule to the two virtual addresses
-	// keeps it equivalent to the modern interface-filtered rule.
-	if _, err := exec.Command(
-		"netsh", "advfirewall", "firewall", "show", "rule", "name="+name,
-	).CombinedOutput(); err == nil {
-		return nil
-	}
-	output, err := exec.Command(
-		"netsh", "advfirewall", "firewall", "add", "rule",
-		"name="+name,
-		"dir=in",
-		"action=allow",
-		"profile=any",
-		"interfacetype=any",
-		"protocol=any",
-		"localip="+localText,
-		"remoteip="+peerText,
-	).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("configure Wintun firewall: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func wintunRoutePrefixes(peers []*windowsSubnetPeer) []netip.Prefix {
+// nativeRoutePrefixes lists the destinations the native TUN interface must
+// route into WireGuard: every peer tail IP plus the remote LAN prefixes of
+// active-side peers. Passive-side advertised routes describe the local LAN and
+// must stay on the physical interface; installing them here would loop the
+// gateway back through the tunnel.
+func nativeRoutePrefixes(peers []*windowsSubnetPeer) []netip.Prefix {
 	routes := make([]netip.Prefix, 0)
 	seenRoute := map[netip.Prefix]bool{}
 	for _, peer := range peers {
@@ -959,11 +745,6 @@ func wintunRoutePrefixes(peers []*windowsSubnetPeer) []netip.Prefix {
 			seenRoute[peerRoute] = true
 			routes = append(routes, peerRoute)
 		}
-		// Active peers need routes to the remote LAN so packets enter WireGuard
-		// and are proxied by the passive peer's gVisor stack. A passive peer's
-		// advertised routes describe its own LAN and must remain on the physical
-		// interface; adding them to Wintun would route the gateway back into the
-		// tunnel and create a loop.
 		if peer.role != "active" {
 			continue
 		}
@@ -977,42 +758,10 @@ func wintunRoutePrefixes(peers []*windowsSubnetPeer) []netip.Prefix {
 	return routes
 }
 
-func ensureWintunIPv4Address(luid winipcfg.LUID, address netip.Prefix) error {
-	_, err := luid.IPAddress(address.Addr())
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, windows.ERROR_NOT_FOUND) {
-		return err
-	}
-	return luid.AddIPAddress(address)
-}
-
-// Full route cleanup is only used after the last peer on an adapter is gone,
-// or during process-start stale-state cleanup. It is intentionally not part of
-// live multi-peer reconciliation.
-func clearWintunIPv4Routes(luid winipcfg.LUID) error {
-	return luid.SetRoutesForFamily(windows.AF_INET, nil)
-}
-
-func ensureWintunIPv4Route(luid winipcfg.LUID, route netip.Prefix) error {
-	const metric = 0
-	nextHop := netip.IPv4Unspecified()
-	existing, err := luid.Route(route, nextHop)
-	if err == nil {
-		if existing.Metric == metric {
-			return nil
-		}
-		existing.Metric = metric
-		return existing.Set()
-	}
-	if !errors.Is(err, windows.ERROR_NOT_FOUND) {
-		return err
-	}
-	return luid.AddRoute(route, nextHop, metric)
-}
-
-func (e *windowsSubnetEngine) reconcileWintunRoutes(key string, luid winipcfg.LUID, routes []netip.Prefix) error {
+// reconcileNativeRoutes differentially applies `routes` through the
+// platform-provided ensure/remove helpers, mirroring the OS route table without
+// flushing entries this engine does not own.
+func (e *windowsSubnetEngine) reconcileNativeRoutes(key string, routes []netip.Prefix, ensure func(netip.Prefix) error, remove func(netip.Prefix) error) error {
 	want := make(map[netip.Prefix]struct{}, len(routes))
 	for _, route := range routes {
 		want[route] = struct{}{}
@@ -1022,10 +771,10 @@ func (e *windowsSubnetEngine) reconcileWintunRoutes(key string, luid winipcfg.LU
 	}
 	current := e.nativeRoutes[key]
 	for route := range want {
-		// Re-read the real route table on every reconcile. current tracks only
-		// ownership for stale deletion and must not mask external drift.
-		if err := ensureWintunIPv4Route(luid, route); err != nil {
-			return fmt.Errorf("configure Wintun route %s: %w", route, err)
+		// Re-apply on every reconcile. current tracks only ownership for stale
+		// deletion and must not mask external drift.
+		if err := ensure(route); err != nil {
+			return fmt.Errorf("configure native route %s: %w", route, err)
 		}
 		current[route] = struct{}{}
 	}
@@ -1033,8 +782,8 @@ func (e *windowsSubnetEngine) reconcileWintunRoutes(key string, luid winipcfg.LU
 		if _, wanted := want[route]; wanted {
 			continue
 		}
-		if err := luid.DeleteRoute(route, netip.IPv4Unspecified()); err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
-			return fmt.Errorf("remove stale Wintun route %s: %w", route, err)
+		if err := remove(route); err != nil {
+			return fmt.Errorf("remove stale native route %s: %w", route, err)
 		}
 		delete(current, route)
 	}
@@ -1416,7 +1165,7 @@ func (e *windowsSubnetEngine) handleICMPEcho(peer *windowsSubnetPeer, dst netip.
 		}()
 		ctx, cancel := context.WithTimeout(peer.ctx, 4*time.Second)
 		defer cancel()
-		if err := exec.CommandContext(ctx, "ping", "-n", "1", "-w", "3000", dst.String()).Run(); err != nil {
+		if err := exec.CommandContext(ctx, "ping", pingArgs(dst.String())...).Run(); err != nil {
 			peer.icmpFailed.Add(1)
 			peer.lastError.Store(err.Error())
 			return
@@ -1519,7 +1268,7 @@ func (e *windowsSubnetEngine) close() {
 	e.closeOnce.Do(func() {
 		if e.tun != nil {
 			for _, key := range e.tun.nativeKeys() {
-				_ = e.clearWintunConfig(key)
+				_ = e.clearNativeTun(key, e.tun.nativeDevice(key))
 			}
 		}
 		if e.wg != nil {
@@ -1531,5 +1280,4 @@ func (e *windowsSubnetEngine) close() {
 	})
 }
 
-var _ conn.Bind = (*loopbackBind)(nil)
 var _ tun.Device = (*subnetNetTun)(nil)

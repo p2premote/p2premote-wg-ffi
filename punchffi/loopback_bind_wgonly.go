@@ -1,4 +1,4 @@
-//go:build windows && wgonly
+//go:build wgonly
 
 package main
 
@@ -118,3 +118,5 @@ func (b *loopbackBind) endpointPackets(s string) (int64, int64) {
 	return x.rx.Load(), x.tx.Load()
 }
 func (b *loopbackBind) batchStats() (int64, int64) { return b.rxBatches.Load(), b.txBatches.Load() }
+
+var _ conn.Bind = (*loopbackBind)(nil)
