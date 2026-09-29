@@ -1,4 +1,3 @@
-// p2premote extension: this entire file exposes WireGuard userspace primitives alongside gonc's mobile binding.
 // Package libwgmobile wraps the tailscale/wireguard-go userspace WireGuard
 // implementation for Android via gomobile.
 //
@@ -13,9 +12,10 @@
 //   4. Android polls WgPeerLastHandshake(peerPubkeyHex) until > 0 (handshake OK).
 //   5. On teardown Android calls WgStop().
 //
-// The WG peer Endpoint points at "127.0.0.1:<gonc_local_forward_port>", so
-// WG-encrypted packets go through gonc's plain outer P2P UDP transport.
-// gonc's sockets must be VpnService.protect()-ed (handled by wgvpnmobile).
+// The WG peer Endpoint points at "127.0.0.1:<local_forward_port>", the local
+// forward port of the punch-native (Rust) UDP tunnel, so WG-encrypted packets
+// ride the plain outer P2P transport. The tunnel's sockets must be
+// VpnService.protect()-ed; WgvpnService on the Android side owns that.
 package libwgmobile
 
 import (
@@ -126,7 +126,7 @@ type WgResult struct {
 // Parameters:
 //   - tunFd: the fd from VpnService.establish()
 //   - privateKeyHex: WG private key in hex (64 hex chars)
-//   - listenPort: WG UDP listen port (51820); WG receives from gonc forwarder
+//   - listenPort: WG UDP listen port (51820); WG receives from the punch-native forwarder
 //   - mtu: TUN MTU (recommend 1280)
 func WgStart(tunFd int, privateKeyHex string, listenPort, mtu int) *WgResult {
 	wgMu.Lock()
@@ -176,7 +176,7 @@ func WgStart(tunFd int, privateKeyHex string, listenPort, mtu int) *WgResult {
 //
 // Parameters:
 //   - peerPubkeyHex: peer public key in hex
-//   - endpoint: peer endpoint, e.g. "127.0.0.1:12345" (gonc local forward port)
+//   - endpoint: peer endpoint, e.g. "127.0.0.1:12345" (punch-native local forward port)
 //   - allowedIPs: comma-separated CIDRs, e.g. "100.99.71.38/32,192.168.1.0/24"
 //   - persistentKeepalive: keepalive interval in seconds (recommend 25, 0 to disable)
 func WgAddPeer(peerPubkeyHex, endpoint, allowedIPs string, persistentKeepalive int) *WgResult {
@@ -198,7 +198,7 @@ func WgAddPeer(peerPubkeyHex, endpoint, allowedIPs string, persistentKeepalive i
 		conf += fmt.Sprintf("endpoint=%s\n", endpoint)
 	}
 	if allowedIPs != "" {
-		for _, cidr := range splitComma(allowedIPs) {
+		for _, cidr := range strings.Split(allowedIPs, ",") {
 			if cidr != "" {
 				conf += fmt.Sprintf("allowed_ip=%s\n", cidr)
 			}
@@ -338,93 +338,51 @@ func GenerateKeypair() (*Keypair, error) {
 
 // ============ helpers ============
 
-func splitComma(s string) []string {
-	var parts []string
-	start := 0
-	for i, c := range s {
-		if c == ',' {
-			parts = append(parts, s[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, s[start:])
-	return parts
-}
-
-func parseLastHandshake(uapiOut, pubkeyHex string) int64 {
-	// UAPI format: lines like "public_key=xxxx" then "last_handshake_time_sec=NNN"
-	currentPeer := ""
+// wgPeerUAPIValues returns the value of each requested key from the
+// wireguard-go UAPI dump, scoped to the peer block whose public_key matches
+// pubkeyHex (hex compare, case-insensitive). A peer block runs from its
+// public_key line to the next public_key or errno line; keys that never
+// appear are absent from the returned map.
+func wgPeerUAPIValues(uapiOut, pubkeyHex string, keys ...string) map[string]string {
+	values := make(map[string]string, len(keys))
 	found := false
-	for _, line := range splitNewline(uapiOut) {
-		key, val := parseKV(line)
-		switch key {
-		case "public_key":
-			currentPeer = val
-			found = currentPeer == pubkeyHex
-		case "last_handshake_time_sec":
-			if found {
-				var sec int64
-				fmt.Sscanf(val, "%d", &sec)
-				return sec
-			}
-		case "errno":
-			// peer block ended
-			if found {
-				return 0
-			}
+	for _, line := range strings.Split(uapiOut, "\n") {
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
 		}
-	}
-	return 0
-}
-
-// parseTransferBytes extracts rx_bytes/tx_bytes for the given peer from UAPI
-// output. Mirrors parseLastHandshake but uses strings.EqualFold for the pubkey
-// compare (more robust than exact match) and reads two counters.
-// Reference: subnet_router_windows.go parseWgPeerState.
-func parseTransferBytes(uapiOut, pubkeyHex string) (rx, tx int64) {
-	found := false
-	for _, line := range splitNewline(uapiOut) {
-		key, val := parseKV(line)
 		switch key {
 		case "public_key":
 			found = strings.EqualFold(val, pubkeyHex)
-		case "rx_bytes":
-			if found {
-				rx, _ = strconv.ParseInt(val, 10, 64)
-			}
-		case "tx_bytes":
-			if found {
-				tx, _ = strconv.ParseInt(val, 10, 64)
-			}
 		case "errno":
 			if found {
-				return
+				return values
+			}
+		default:
+			if !found {
+				continue
+			}
+			for _, want := range keys {
+				if key == want {
+					values[key] = val
+				}
 			}
 		}
 	}
+	return values
+}
+
+// parseLastHandshake returns the unix timestamp (seconds) of the peer's last
+// successful handshake, or 0 if the peer has not handshaken.
+func parseLastHandshake(uapiOut, pubkeyHex string) int64 {
+	sec, _ := strconv.ParseInt(wgPeerUAPIValues(uapiOut, pubkeyHex, "last_handshake_time_sec")["last_handshake_time_sec"], 10, 64)
+	return sec
+}
+
+// parseTransferBytes returns the peer's rx_bytes/tx_bytes counters.
+func parseTransferBytes(uapiOut, pubkeyHex string) (rx, tx int64) {
+	values := wgPeerUAPIValues(uapiOut, pubkeyHex, "rx_bytes", "tx_bytes")
+	rx, _ = strconv.ParseInt(values["rx_bytes"], 10, 64)
+	tx, _ = strconv.ParseInt(values["tx_bytes"], 10, 64)
 	return
-}
-
-func splitNewline(s string) []string {
-	var lines []string
-	start := 0
-	for i, c := range s {
-		if c == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-func parseKV(line string) (key, val string) {
-	for i, c := range line {
-		if c == '=' {
-			return line[:i], line[i+1:]
-		}
-	}
-	return line, ""
 }
