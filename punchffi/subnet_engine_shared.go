@@ -118,80 +118,6 @@ var windowsSubnetManager struct {
 	engine *windowsSubnetEngine
 }
 
-func startWindowsSubnetRouter(req startSubnetRouterInput) *subnetRouterResult {
-	tailIP, peerTailIP, routes, err := validateWindowsSubnetRequest(req)
-	if err != nil {
-		return &subnetRouterResult{OK: false, Error: err.Error()}
-	}
-	peerKey, err := wgKeyBase64ToHex(req.PeerPublicKey)
-	if err != nil {
-		return &subnetRouterResult{OK: false, Error: fmt.Sprintf("invalid peer_public_key: %v", err)}
-	}
-
-	windowsSubnetManager.Lock()
-	defer windowsSubnetManager.Unlock()
-	engine := windowsSubnetManager.engine
-	if engine == nil {
-		engine, err = newWindowsSubnetEngine(req)
-		if err != nil {
-			return &subnetRouterResult{OK: false, Error: err.Error()}
-		}
-		windowsSubnetManager.engine = engine
-	} else if err := engine.compatible(req); err != nil {
-		return &subnetRouterResult{OK: false, Error: err.Error()}
-	}
-	if err := engine.checkPeerConflicts("passive", peerKey, peerTailIP, routes); err != nil {
-		return &subnetRouterResult{OK: false, Error: err.Error()}
-	}
-
-	handleID := fmt.Sprintf("subnet-%d", time.Now().UnixNano())
-	ctx, cancel := context.WithCancel(context.Background())
-	peer := &windowsSubnetPeer{
-		handleID: handleID, role: "passive", publicKey: peerKey, endpoint: strings.TrimSpace(req.PeerEndpoint), localTailIP: tailIP, peerTailIP: peerTailIP,
-		routes: routes, advertised: append([]string(nil), req.ExposedLANCIDRs...),
-		ctx: ctx, cancel: cancel,
-	}
-	if err := engine.addPeer(req, peer); err != nil {
-		cancel()
-		if len(engine.peers) == 0 {
-			engine.close()
-			windowsSubnetManager.engine = nil
-		}
-		return &subnetRouterResult{OK: false, Error: err.Error()}
-	}
-	engine.peers[handleID] = peer
-
-	result := subnetRouterResult{OK: true, HandleID: handleID, LanMode: "userspace_snat", ListenIP: req.ListenIP, ListenPort: req.ListenPort, Started: true, AdvertisedRoutes: peer.advertised}
-	subnetRoutersMu.Lock()
-	subnetRouters[handleID] = &subnetRouterHandle{
-		result:   result,
-		stopFn:   func() { stopWindowsSubnetPeer(handleID) },
-		statusFn: func(out *subnetRouterResult) { updateWindowsSubnetStatus(handleID, out) },
-	}
-	subnetRoutersMu.Unlock()
-	return &result
-}
-
-func validateWindowsSubnetRequest(req startSubnetRouterInput) (netip.Addr, netip.Addr, []netip.Prefix, error) {
-	tailIP, err := netip.ParseAddr(req.TailIP)
-	if err != nil || !tailIP.Is4() {
-		return netip.Addr{}, netip.Addr{}, nil, fmt.Errorf("invalid tail_ip: %s", req.TailIP)
-	}
-	peerTailIP, err := netip.ParseAddr(req.PeerTailIP)
-	if err != nil || !peerTailIP.Is4() {
-		return netip.Addr{}, netip.Addr{}, nil, fmt.Errorf("invalid peer_tail_ip: %s", req.PeerTailIP)
-	}
-	routes := make([]netip.Prefix, 0, len(req.ExposedLANCIDRs))
-	for _, text := range req.ExposedLANCIDRs {
-		prefix, err := netip.ParsePrefix(text)
-		if err != nil || !prefix.Addr().Is4() {
-			return netip.Addr{}, netip.Addr{}, nil, fmt.Errorf("invalid ipv4 exposed_lan_cidr: %s", text)
-		}
-		routes = append(routes, prefix.Masked())
-	}
-	return tailIP.Unmap(), peerTailIP.Unmap(), routes, nil
-}
-
 func newWindowsSubnetEngine(req startSubnetRouterInput) (*windowsSubnetEngine, error) {
 	privateKey, err := wgKeyBase64ToHex(req.WgPrivateKey)
 	if err != nil {
@@ -329,7 +255,7 @@ func startWindowsWgPeer(req startWindowsWgPeerInput) *windowsWgPeerResult {
 		WgPrivateKey: req.WgPrivateKey, PeerPublicKey: req.PeerPublicKey,
 		TailIP: localTailIP.String(), PeerTailIP: peerTailIP.String(),
 		PeerEndpoint: req.PeerEndpoint, ListenIP: listenIP, ListenPort: listenPort,
-		ExposedLANCIDRs: req.Routes, SNAT: true, AllowTCP: true, AllowUDP: true, AllowICMPEcho: true,
+		ExposedLANCIDRs: req.Routes,
 	}
 
 	windowsSubnetManager.Lock()
@@ -584,7 +510,7 @@ func (e *windowsSubnetEngine) peerResult(peer *windowsSubnetPeer) *windowsWgPeer
 		result.LastError, _ = value.(string)
 	}
 	result.RxPackets, result.TxPackets = e.bind.endpointPackets(peer.endpoint)
-	result.RxBatches, result.TxBatches = e.bind.batchStats()
+	result.TxBatches = e.bind.txBatchStats()
 	if e.wg != nil {
 		if state, err := e.wg.IpcGet(); err == nil {
 			result.LastHandshakeAt, result.RxBytes, result.TxBytes = parseWgPeerState(state, peer.publicKey)
@@ -784,62 +710,6 @@ func (e *windowsSubnetEngine) removeRegisteredAddresses() {
 		_ = e.net.stack.RemoveAddress(subnetNetstackNICID, tcpip.AddrFromSlice(ip.AsSlice()))
 		delete(e.registered, ip)
 	}
-}
-
-func stopWindowsSubnetPeer(handleID string) {
-	windowsSubnetManager.Lock()
-	e := windowsSubnetManager.engine
-	if e == nil {
-		windowsSubnetManager.Unlock()
-		return
-	}
-	peer := e.peers[handleID]
-	if peer == nil {
-		windowsSubnetManager.Unlock()
-		return
-	}
-	delete(e.peers, handleID)
-	peer.cancel()
-	windowsSubnetManager.Unlock()
-
-	// Wait outside windowsSubnetManager: forwarding goroutines release dynamic
-	// addresses during defer and must finish before their peer is removed.
-	if !waitWindowsSubnetPeer(peer, windowsPeerStopTimeout) {
-		return
-	}
-
-	windowsSubnetManager.Lock()
-	defer windowsSubnetManager.Unlock()
-	if windowsSubnetManager.engine != e {
-		return
-	}
-	if e.wg != nil {
-		_ = e.wg.IpcSet("public_key=" + peer.publicKey + "\nremove=true\n")
-	}
-	e.removeRegisteredAddresses()
-	if len(e.peers) == 0 {
-		e.close()
-		windowsSubnetManager.engine = nil
-	}
-}
-
-func updateWindowsSubnetStatus(handleID string, out *subnetRouterResult) {
-	windowsSubnetManager.Lock()
-	defer windowsSubnetManager.Unlock()
-	e := windowsSubnetManager.engine
-	if e == nil || e.peers[handleID] == nil {
-		out.Started = false
-		return
-	}
-	p := e.peers[handleID]
-	out.LanMode, out.Started = "userspace_snat", true
-	out.TCPSessions, out.UDPSessions = int(p.tcpActive.Load()), int(p.udpActive.Load())
-	out.ICMPSuccess, out.ICMPFailed, out.RejectedFlows = p.icmpOK.Load(), p.icmpFailed.Load(), p.rejected.Load()
-	if v := p.lastError.Load(); v != nil {
-		out.LastError, _ = v.(string)
-	}
-	out.WGRxPackets, out.WGTxPackets = e.bind.endpointPackets(p.endpoint)
-	out.AdvertisedRoutes = append([]string(nil), p.advertised...)
 }
 
 func (e *windowsSubnetEngine) resolvePeer(src, dst netip.Addr) *windowsSubnetPeer {

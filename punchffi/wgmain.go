@@ -28,27 +28,6 @@ func wgInput(p *C.char) (string, bool) {
 	return C.GoString(p), true
 }
 
-func handleStartSubnetRouterJSON(s string) string {
-	var r startSubnetRouterInput
-	if err := json.Unmarshal([]byte(s), &r); err != nil {
-		return encodeJSON(&subnetRouterResult{Error: "invalid input json: " + err.Error()})
-	}
-	return encodeJSON(startSubnetRouter(r))
-}
-func handleStopSubnetRouterJSON(s string) string {
-	var r stopSubnetRouterInput
-	if err := json.Unmarshal([]byte(s), &r); err != nil {
-		return encodeJSON(&subnetRouterResult{Error: "invalid input json: " + err.Error()})
-	}
-	return encodeJSON(stopSubnetRouter(r.HandleID))
-}
-func handleGetSubnetRouterStatusJSON(s string) string {
-	var r getSubnetRouterStatusInput
-	if err := json.Unmarshal([]byte(s), &r); err != nil {
-		return encodeJSON(&subnetRouterResult{Error: "invalid input json: " + err.Error()})
-	}
-	return encodeJSON(getSubnetRouterStatus(r.HandleID))
-}
 func handleStartWindowsWgPeerJSON(s string) string {
 	var r startWindowsWgPeerInput
 	if err := json.Unmarshal([]byte(s), &r); err != nil {
@@ -69,33 +48,6 @@ func handleWgAllowedJSON(s string) string {
 		return encodeJSON(&windowsWgPeerResult{Error: "invalid input json: " + err.Error()})
 	}
 	return encodeJSON(setWindowsWgPeerAllowed(r.HandleID, r.Allowed))
-}
-
-//export StartSubnetRouter
-func StartSubnetRouter(p *C.char) *C.char {
-	s, ok := wgInput(p)
-	if !ok {
-		return C.CString(s)
-	}
-	return C.CString(handleStartSubnetRouterJSON(s))
-}
-
-//export StopSubnetRouter
-func StopSubnetRouter(p *C.char) *C.char {
-	s, ok := wgInput(p)
-	if !ok {
-		return C.CString(s)
-	}
-	return C.CString(handleStopSubnetRouterJSON(s))
-}
-
-//export GetSubnetRouterStatus
-func GetSubnetRouterStatus(p *C.char) *C.char {
-	s, ok := wgInput(p)
-	if !ok {
-		return C.CString(s)
-	}
-	return C.CString(handleGetSubnetRouterStatusJSON(s))
 }
 
 //export GetWgCapabilities

@@ -15,10 +15,12 @@ const userspaceWGBatchSize = 32
 
 type endpointPacketCounters struct{ rx, tx atomic.Int64 }
 type loopbackBind struct {
-	mu                   sync.Mutex
-	conn                 *net.UDPConn
-	counters             sync.Map
-	rxBatches, txBatches atomic.Int64
+	mu       sync.Mutex
+	conn     *net.UDPConn
+	counters sync.Map
+	// tx batches only: recv handles exactly one packet per call (BatchSize==1),
+	// so a receive-side batch count would always equal the packet count.
+	txBatches atomic.Int64
 }
 
 func newLoopbackBind() *loopbackBind { return &loopbackBind{} }
@@ -49,7 +51,6 @@ func (b *loopbackBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		sizes[0] = n
 		eps[0] = &conn.StdNetEndpoint{AddrPort: ap}
 		b.counter(ap).rx.Add(1)
-		b.rxBatches.Add(1)
 		return 1, nil
 	}
 	return []conn.ReceiveFunc{recv}, uint16(c.LocalAddr().(*net.UDPAddr).Port), nil
@@ -117,6 +118,6 @@ func (b *loopbackBind) endpointPackets(s string) (int64, int64) {
 	x := v.(*endpointPacketCounters)
 	return x.rx.Load(), x.tx.Load()
 }
-func (b *loopbackBind) batchStats() (int64, int64) { return b.rxBatches.Load(), b.txBatches.Load() }
+func (b *loopbackBind) txBatchStats() int64 { return b.txBatches.Load() }
 
 var _ conn.Bind = (*loopbackBind)(nil)
