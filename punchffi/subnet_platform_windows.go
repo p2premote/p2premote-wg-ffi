@@ -83,7 +83,6 @@ func (e *windowsSubnetEngine) clearNativeTun(key string, device tun.Device) erro
 	if err := e.reconcileWintunFirewall(key, netip.Addr{}, nil); err != nil {
 		return err
 	}
-	clearLegacyWintunFirewallRule(key)
 	if e.tun == nil || device == nil {
 		return nil
 	}
@@ -159,19 +158,6 @@ func primeWintunRoutes(localIP netip.Addr, peers []*windowsSubnetPeer) {
 
 func wintunFirewallRuleName(localIP string, peerIP netip.Addr) string {
 	return "p2pRemote WGVPN Wintun " + localIP + " peer " + peerIP.String()
-}
-
-// clearLegacyWintunFirewallRule removes the pre-differential aggregate rule.
-// It is only used when an adapter has no remaining peers (or during startup
-// cleanup), never while an existing connection is using that adapter.
-func clearLegacyWintunFirewallRule(localIP string) {
-	if localIP == "" {
-		return
-	}
-	_ = exec.Command(
-		"netsh", "advfirewall", "firewall", "delete", "rule",
-		"name="+"p2pRemote WGVPN Wintun "+localIP,
-	).Run()
 }
 
 func clearWintunFirewallRule(localIP string, peerIP netip.Addr) error {
