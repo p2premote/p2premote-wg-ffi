@@ -53,6 +53,24 @@ func runRouteCommand(args ...string) error {
 	return nil
 }
 
+// darwinRouteInterface reports the interface the kernel currently uses to
+// reach `route`. `route get` with an explicit prefix does a masked lookup: a
+// matching route reports its owning interface, while a missing route either
+// falls back to the default route or fails — both surface a foreign (or
+// absent) interface, never ours.
+func darwinRouteInterface(route netip.Prefix) (string, bool) {
+	output, err := exec.Command("route", "-n", "get", "-net", route.String()).CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "interface:"); ok {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
+}
+
 func (e *windowsSubnetEngine) configureNativeTun(key string, device tun.Device, localIP netip.Addr, peers []*windowsSubnetPeer) error {
 	if device == nil {
 		return fmt.Errorf("native TUN is not attached")
@@ -71,8 +89,14 @@ func (e *windowsSubnetEngine) configureNativeTun(key string, device tun.Device, 
 	}
 	routePrefixes := nativeRoutePrefixes(peers)
 	ensure := func(route netip.Prefix) error {
-		// route add is not idempotent; delete first so reconciliation can run
-		// repeatedly. A missing route on delete is not an error here.
+		// Reconciliation re-applies every wanted route on each call; keep the
+		// steady state non-destructive so live peers keep forwarding (a
+		// delete/add cycle blackholes traffic between the two invocations).
+		// Drift — a missing route, or one owned by another interface — still
+		// re-applies; route add itself is not idempotent, hence delete first.
+		if iface, ok := darwinRouteInterface(route); ok && iface == name {
+			return nil
+		}
 		_ = runRouteCommand("-n", "delete", "-net", route.String(), "-interface", name)
 		return runRouteCommand("-n", "add", "-net", route.String(), "-interface", name)
 	}
