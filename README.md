@@ -21,8 +21,10 @@ The exported JSON-in/JSON-out functions are:
 - \`GetWgCapabilities\`, \`GenerateWgKeypair\`
 - \`Start/Stop/Get/SetUserspaceWgPeer\`
 - \`StopUserspaceWgEngine\`, \`CleanupUserspaceWgPlatform\`
-- \`Start/Stop/GetSubnetRouter\`
 - \`FreeCString\`
+
+The legacy Windows* export aliases and the SubnetRouter entry points were
+removed 2026-09-30 (audits B-1/B-3): no client ever resolved them.
 
 Every returned string must be released by this module's \`FreeCString\`.
 

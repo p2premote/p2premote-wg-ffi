@@ -62,8 +62,8 @@ func GenerateWgKeypair(p *C.char) *C.char {
 	return C.CString(encodeJSON(generateWindowsWgKeypair()))
 }
 
-//export StartWindowsWgPeer
-func StartWindowsWgPeer(p *C.char) *C.char {
+//export StartUserspaceWgPeer
+func StartUserspaceWgPeer(p *C.char) *C.char {
 	s, ok := wgInput(p)
 	if !ok {
 		return C.CString(s)
@@ -71,8 +71,8 @@ func StartWindowsWgPeer(p *C.char) *C.char {
 	return C.CString(handleStartWindowsWgPeerJSON(s))
 }
 
-//export StopWindowsWgPeer
-func StopWindowsWgPeer(p *C.char) *C.char {
+//export StopUserspaceWgPeer
+func StopUserspaceWgPeer(p *C.char) *C.char {
 	s, ok := wgInput(p)
 	if !ok {
 		return C.CString(s)
@@ -80,8 +80,8 @@ func StopWindowsWgPeer(p *C.char) *C.char {
 	return C.CString(handleWgPeerJSON(s, stopWindowsWgPeer))
 }
 
-//export GetWindowsWgPeerStatus
-func GetWindowsWgPeerStatus(p *C.char) *C.char {
+//export GetUserspaceWgPeerStatus
+func GetUserspaceWgPeerStatus(p *C.char) *C.char {
 	s, ok := wgInput(p)
 	if !ok {
 		return C.CString(s)
@@ -89,8 +89,8 @@ func GetWindowsWgPeerStatus(p *C.char) *C.char {
 	return C.CString(handleWgPeerJSON(s, getWindowsWgPeerStatus))
 }
 
-//export SetWindowsWgPeerAllowed
-func SetWindowsWgPeerAllowed(p *C.char) *C.char {
+//export SetUserspaceWgPeerAllowed
+func SetUserspaceWgPeerAllowed(p *C.char) *C.char {
 	s, ok := wgInput(p)
 	if !ok {
 		return C.CString(s)
@@ -98,35 +98,17 @@ func SetWindowsWgPeerAllowed(p *C.char) *C.char {
 	return C.CString(handleWgAllowedJSON(s))
 }
 
-//export StopWindowsWgEngine
-func StopWindowsWgEngine(p *C.char) *C.char {
+//export StopUserspaceWgEngine
+func StopUserspaceWgEngine(p *C.char) *C.char {
 	_ = p
 	return C.CString(encodeJSON(stopWindowsWgEngine()))
 }
 
-//export CleanupWindowsWgPlatform
-func CleanupWindowsWgPlatform(p *C.char) *C.char {
+//export CleanupUserspaceWgPlatform
+func CleanupUserspaceWgPlatform(p *C.char) *C.char {
 	_ = p
 	return C.CString(encodeJSON(cleanupWindowsWgPlatform()))
 }
-
-//export StartUserspaceWgPeer
-func StartUserspaceWgPeer(p *C.char) *C.char { return StartWindowsWgPeer(p) }
-
-//export StopUserspaceWgPeer
-func StopUserspaceWgPeer(p *C.char) *C.char { return StopWindowsWgPeer(p) }
-
-//export GetUserspaceWgPeerStatus
-func GetUserspaceWgPeerStatus(p *C.char) *C.char { return GetWindowsWgPeerStatus(p) }
-
-//export SetUserspaceWgPeerAllowed
-func SetUserspaceWgPeerAllowed(p *C.char) *C.char { return SetWindowsWgPeerAllowed(p) }
-
-//export StopUserspaceWgEngine
-func StopUserspaceWgEngine(p *C.char) *C.char { return StopWindowsWgEngine(p) }
-
-//export CleanupUserspaceWgPlatform
-func CleanupUserspaceWgPlatform(p *C.char) *C.char { return CleanupWindowsWgPlatform(p) }
 
 //export FreeCString
 func FreeCString(p *C.char) {
