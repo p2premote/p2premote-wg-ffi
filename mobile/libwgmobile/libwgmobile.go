@@ -6,11 +6,11 @@
 // it to an Android VpnService TUN file descriptor.
 //
 // Lifecycle:
-//   1. Android side calls VpnService.establish() to get a TUN fd.
-//   2. Android calls WgStart(fd, privateKeyHex, listenPort) to start WG.
-//   3. Android calls WgAddPeer(...) for each peer.
-//   4. Android polls WgPeerLastHandshake(peerPubkeyHex) until > 0 (handshake OK).
-//   5. On teardown Android calls WgStop().
+//  1. Android side calls VpnService.establish() to get a TUN fd.
+//  2. Android calls WgStart(fd, privateKeyHex, listenPort) to start WG.
+//  3. Android calls WgAddPeer(...) for each peer.
+//  4. Android polls WgPeerLastHandshake(peerPubkeyHex) until > 0 (handshake OK).
+//  5. On teardown Android calls WgStop().
 //
 // The WG peer Endpoint points at "127.0.0.1:<local_forward_port>", the local
 // forward port of the punch-native (Rust) UDP tunnel, so WG-encrypted packets
@@ -29,10 +29,10 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/crypto/curve25519"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
 	wgTun "github.com/tailscale/wireguard-go/tun"
+	"golang.org/x/crypto/curve25519"
 )
 
 // ============ android TUN fd wrapper ============
@@ -40,11 +40,11 @@ import (
 // androidTun wraps an Android VpnService file descriptor as a tun.Device.
 // The fd behaves like a TUN device: Read returns IP packets, Write injects them.
 type androidTun struct {
-	f       *os.File
-	mtu     int
-	events  chan wgTun.Event
-	mu      sync.Mutex
-	closed  bool
+	f      *os.File
+	mtu    int
+	events chan wgTun.Event
+	mu     sync.Mutex
+	closed bool
 }
 
 func newAndroidTun(fd int, mtu int) (*androidTun, error) {
@@ -90,8 +90,8 @@ func (t *androidTun) Write(bufs [][]byte, offset int) (int, error) {
 	return len(bufs), nil
 }
 
-func (t *androidTun) MTU() (int, error)     { return t.mtu, nil }
-func (t *androidTun) Name() (string, error) { return "android-tun", nil }
+func (t *androidTun) MTU() (int, error)          { return t.mtu, nil }
+func (t *androidTun) Name() (string, error)      { return "android-tun", nil }
 func (t *androidTun) Events() <-chan wgTun.Event { return t.events }
 
 func (t *androidTun) Close() error {
@@ -110,8 +110,8 @@ func (t *androidTun) BatchSize() int { return 1 }
 // ============ WG device singleton ============
 
 var (
-	wgMu   sync.Mutex
-	wgDev  *device.Device
+	wgMu     sync.Mutex
+	wgDev    *device.Device
 	wgTunDev *androidTun
 )
 
