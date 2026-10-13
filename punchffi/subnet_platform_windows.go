@@ -175,6 +175,12 @@ func clearWintunFirewallRule(localIP string, peerIP netip.Addr) error {
 }
 
 func (e *windowsSubnetEngine) reconcileWintunFirewall(key string, localIP netip.Addr, peers []*windowsSubnetPeer) error {
+	return withWintunFirewall(wintunFirewallServiceState, func() error {
+		return e.reconcileWintunFirewallRules(key, localIP, peers)
+	})
+}
+
+func (e *windowsSubnetEngine) reconcileWintunFirewallRules(key string, localIP netip.Addr, peers []*windowsSubnetPeer) error {
 	want := make(map[netip.Addr]struct{}, len(peers))
 	for _, peer := range peers {
 		if peer.peerTailIP.IsValid() {
