@@ -147,6 +147,7 @@ func (h *hybridTun) copyNativePacket(dst []byte, offset int, sizes []int, index 
 		return io.ErrShortBuffer
 	}
 	copy(dst[offset:], packet.buf)
+	localServiceFilter.observeOutbound(packet.buf)
 	sizes[index] = len(packet.buf)
 	return nil
 }

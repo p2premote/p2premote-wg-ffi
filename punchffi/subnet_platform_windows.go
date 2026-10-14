@@ -22,7 +22,7 @@ import (
 
 func platformWgCapabilities() *wgCapabilitiesResult {
 	return &wgCapabilitiesResult{
-		OK: true, ABIVersion: 2, Platform: "windows", UserspaceWG: true, HybridTun: true, Wintun: true, NativeTun: true,
+		OK: true, ABIVersion: 3, Platform: "windows", UserspaceWG: true, HybridTun: true, Wintun: true, NativeTun: true,
 	}
 }
 

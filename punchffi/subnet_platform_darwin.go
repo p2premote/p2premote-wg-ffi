@@ -18,7 +18,7 @@ import (
 
 func platformWgCapabilities() *wgCapabilitiesResult {
 	return &wgCapabilitiesResult{
-		OK: true, ABIVersion: 2, Platform: "darwin", UserspaceWG: true, HybridTun: true, Wintun: false, NativeTun: true,
+		OK: true, ABIVersion: 3, Platform: "darwin", UserspaceWG: true, HybridTun: true, Wintun: false, NativeTun: true,
 	}
 }
 

@@ -15,12 +15,13 @@ GOTOOLCHAIN=go1.20.14 go build -tags wgonly -buildmode=c-shared \
   -ldflags "-s -w" -o p2premote-wg.dll ./punchffi
 \`\`\`
 
-The client requires ABI version \`2\`, reported by \`GetWgCapabilities\`.
+The client requires ABI version \`3\`, reported by \`GetWgCapabilities\`.
 The exported JSON-in/JSON-out functions are:
 
 - \`GetWgCapabilities\`, \`GenerateWgKeypair\`
 - \`Start/Stop/Get/SetUserspaceWgPeer\`
 - \`StopUserspaceWgEngine\`, \`CleanupUserspaceWgPlatform\`
+- \`SetServiceAccessPolicy\` (device-local ingress whitelist; applied before native TUN delivery)
 - \`FreeCString\`
 
 The legacy Windows* export aliases and the SubnetRouter entry points were

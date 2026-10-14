@@ -56,6 +56,15 @@ func GetWgCapabilities(p *C.char) *C.char {
 	return C.CString(encodeJSON(platformWgCapabilities()))
 }
 
+//export SetServiceAccessPolicy
+func SetServiceAccessPolicy(p *C.char) *C.char {
+	s, ok := wgInput(p)
+	if !ok {
+		return C.CString(s)
+	}
+	return C.CString(handleServiceAccessJSON(s))
+}
+
 //export GenerateWgKeypair
 func GenerateWgKeypair(p *C.char) *C.char {
 	_ = p

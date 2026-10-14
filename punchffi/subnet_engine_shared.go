@@ -371,6 +371,7 @@ func stopWindowsWgPeer(handleID string) *windowsWgPeerResult {
 		return &windowsWgPeerResult{OK: true}
 	}
 	engine.removePeerConfig(peer)
+	localServiceFilter.forgetPeer(peer.peerTailIP)
 	engine.removeRegisteredAddresses()
 	if len(engine.peers) == 0 {
 		engine.close()
@@ -803,6 +804,10 @@ func (e *windowsSubnetEngine) handleInboundPacket(raw []byte, offset int) hybrid
 		return hybridPacketConsumed
 	}
 	if e.usesNativeDestination(peer, dst) {
+		if !localServiceFilter.allowInbound(packet) {
+			peer.rejected.Add(1)
+			return hybridPacketConsumed
+		}
 		if err := e.tun.writeNative(peer.localTailIP.String(), raw, offset); err != nil {
 			peer.lastError.Store(err.Error())
 			peer.rejected.Add(1)
@@ -1100,6 +1105,9 @@ func (e *windowsSubnetEngine) close() {
 		if e.tun != nil {
 			_ = e.tun.Close()
 		}
+		localServiceFilter.Lock()
+		localServiceFilter.flows = make(map[serviceTuple]serviceFlow)
+		localServiceFilter.Unlock()
 	})
 }
 
